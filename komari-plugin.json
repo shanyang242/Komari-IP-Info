@@ -1,0 +1,122 @@
+{
+  "name": {
+    "zh_CN": "IP 信息",
+    "en": "IP Information"
+  },
+  "short": "ip-info",
+  "description": {
+    "zh_CN": "为 Komari 主题LuminaPlus提供节点 IP 的地理、网络、原生性和全球延迟信息。",
+    "en": "Provides account-free IP geolocation, network, native classification and global latency data for Komari themes."
+  },
+  "author": "shanyang",
+  "version": "0.0.1",
+  "url": "https://github.com/shanyang242/Komari-IP-Info",
+  "komari": ">=0.0.1",
+  "entry": "script.js",
+  "permissions": {
+    "node": true,
+    "allowRoutes": true,
+    "maxHTTPBodyBytes": 16384,
+    "timeout": 30
+  },
+  "configuration": {
+    "type": "managed",
+    "name": {
+      "zh_CN": "IP 信息设置",
+      "en": "IP information settings"
+    },
+    "data": [
+      {
+        "key": "cache_hours",
+        "name": {
+          "zh_CN": "缓存时间（小时）",
+          "en": "Cache lifetime (hours)"
+        },
+        "type": "number",
+        "default": 24,
+        "help": {
+          "zh_CN": "范围 1–720 小时。",
+          "en": "Range: 1–720 hours."
+        }
+      },
+      {
+        "key": "stale_hours",
+        "name": {
+          "zh_CN": "故障时保留旧缓存（小时）",
+          "en": "Stale cache lifetime (hours)"
+        },
+        "type": "number",
+        "default": 168,
+        "help": {
+          "zh_CN": "第三方接口失败时继续返回旧数据，范围 24–2160 小时。",
+          "en": "Serve older data when the provider is unavailable. Range: 24–2160 hours."
+        }
+      },
+      {
+        "key": "request_timeout_seconds",
+        "name": {
+          "zh_CN": "请求超时（秒）",
+          "en": "Request timeout (seconds)"
+        },
+        "type": "number",
+        "default": 5,
+        "help": {
+          "zh_CN": "单个数据源范围 2–8 秒。",
+          "en": "Per-provider range: 2–8 seconds."
+        }
+      },
+      {
+        "key": "daily_lookup_limit",
+        "name": {
+          "zh_CN": "每日外部查询上限",
+          "en": "Daily provider lookup limit"
+        },
+        "type": "number",
+        "default": 45,
+        "help": {
+          "zh_CN": "按未命中缓存的完整 IP 检测计数；正常情况每次只请求一次 Net.Coffee，失败时依次使用 proxycheck.io 和 ipapi.is。",
+          "en": "Counts uncached IP checks. Normally each check makes one Net.Coffee request, with proxycheck.io and ipapi.is used as fallbacks."
+        }
+      },
+      {
+        "key": "latency_cache_minutes",
+        "name": {
+          "zh_CN": "全球延迟缓存（分钟）",
+          "en": "Global latency cache (minutes)"
+        },
+        "type": "number",
+        "default": 60,
+        "help": {
+          "zh_CN": "全球节点检测的缓存时间，范围 10–1440 分钟；失败结果只保留 5 分钟。",
+          "en": "Cache lifetime for global probes. Range: 10–1440 minutes; failures are retained for only 5 minutes."
+        }
+      },
+      {
+        "key": "daily_latency_limit",
+        "name": {
+          "zh_CN": "每日全球延迟检测上限",
+          "en": "Daily global latency limit"
+        },
+        "type": "number",
+        "default": 45,
+        "help": {
+          "zh_CN": "只统计未命中缓存的按需检测，避免公开接口被滥用。",
+          "en": "Counts on-demand checks that miss the cache to limit abuse of the public endpoint."
+        }
+      },
+      {
+        "key": "lazy_lookup",
+        "name": {
+          "zh_CN": "允许主题自动查询",
+          "en": "Allow lazy theme lookups"
+        },
+        "type": "switch",
+        "default": true,
+        "help": {
+          "zh_CN": "开启后，公开读取接口在没有有效缓存时自动查询数据源；关闭后只能由管理员刷新。",
+          "en": "When enabled, the public read endpoint queries the provider on a cache miss. Otherwise only administrators can refresh data."
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "komari-ip-info",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Komari IP information plugin",
+  "scripts": {
+    "test": "node tests/test.js",
+    "package": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package.ps1"
+  }
+}
