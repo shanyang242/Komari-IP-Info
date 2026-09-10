@@ -120,6 +120,14 @@ npm test
 npm run package
 ```
 
+IPv6 兼容性还可使用 Komari 自身的 JS 运行时验证。在与插件并列的 Komari 源码目录中运行：
+
+```powershell
+go run ../Komari-IP-Info/tests/runtime/main.go ../Komari-IP-Info/script.js
+```
+
+该测试使用真实的 `net` 模块且不注入全局 `URL`，验证 IPv6 路由、映射地址拦截和内存缓存复用；第三方请求与磁盘持久化由测试替身接管。
+
 插件安装版本固定为 `0.0.1`；内部缓存结构通过独立的 `schema_version` 管理。
 
 每次推送到 GitHub 仓库的 `main` 分支后，GitHub Actions 会自动运行测试和打包，并覆盖更新 `v0.0.1` Release 中的 ZIP 附件。版本号保持不变，Release 下载地址也保持稳定。

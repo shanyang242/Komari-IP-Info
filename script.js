@@ -170,14 +170,36 @@ function cleanBody(req) {
 
 function canonicalIP(ip) {
   if (typeof ip !== "string") return null;
-  if (net.isIP(ip) === 4) return ip;
-  if (net.isIP(ip) !== 6) return null;
-  return new URL("http://[" + ip + "]/").hostname.slice(1, -1);
+  const family = net.isIP(ip);
+  // Komari's Go-backed net.isIP reports IPv4-mapped IPv6 as family 4.
+  if (family === 4) return ip.indexOf(":") === -1 ? ip : null;
+  if (family !== 6) return null;
+  let address = ip.toLowerCase();
+  if (address.indexOf(".") !== -1) {
+    const tail = address.lastIndexOf(":");
+    const bytes = address.slice(tail + 1).split(".").map(Number);
+    address = address.slice(0, tail + 1) + ((bytes[0] << 8) | bytes[1]).toString(16) + ":" + ((bytes[2] << 8) | bytes[3]).toString(16);
+  }
+  const halves = address.split("::");
+  const left = halves[0] ? halves[0].split(":") : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const words = (halves.length === 2 ? left.concat(Array(8 - left.length - right.length).fill("0"), right) : left)
+    .map(function (word) { return parseInt(word, 16).toString(16); });
+  let start = -1;
+  let length = 1;
+  for (let i = 0; i < words.length;) {
+    if (words[i] !== "0") { i++; continue; }
+    const from = i;
+    while (i < words.length && words[i] === "0") i++;
+    if (i - from > length) { start = from; length = i - from; }
+  }
+  return start < 0 ? words.join(":") : words.slice(0, start).join(":") + "::" + words.slice(start + length).join(":");
 }
 
 function isPublicIP(ip, family) {
   if (!family || net.isIP(ip) !== family) return false;
   if (family === 4) {
+    if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) return false;
     const parts = ip.split(".").map(Number);
     const a = parts[0];
     const b = parts[1];

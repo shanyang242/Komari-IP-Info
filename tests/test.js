@@ -85,13 +85,19 @@ const context = {
     if (name === "server") return serverMock;
     if (name === "fs") return fs;
     if (name === "path") return path;
-    if (name === "net") return net;
+    if (name === "net") return {
+      isIP(ip) {
+        // Komari uses net.ParseIP(...).To4(), including hex-mapped input.
+        const family = net.isIP(ip);
+        if (family === 6 && new URL("http://[" + ip + "]/").hostname.startsWith("[::ffff:")) return 4;
+        return family;
+      },
+    };
     throw new Error("Unexpected module: " + name);
   },
   __storageDir__: storageDir,
   console,
   AbortController,
-  URL,
   setTimeout,
   clearTimeout,
   fetch: async function (url, options) {
@@ -198,7 +204,7 @@ try {
 
   assert.strictEqual(helpers.isPublicIP("8.8.8.8", 4), true);
   ["0:0:0:0:0:0:0:1", "::ffff:127.0.0.1", "::ffff:7f00:1", "2001:0db8:0:0::1", "fc00::1"].forEach(ip => {
-    assert.strictEqual(helpers.isPublicIP(ip, 6), false, ip);
+    assert.strictEqual(helpers.isPublicIP(ip, context.require("net").isIP(ip)), false, ip);
   });
   assert.strictEqual(helpers.isPublicIP("192.0.2.1", 4), false);
   [{}, [], { ip: "1.1.1.1", countryCode: "US" }, { ip: "8.8.8.8" }].forEach(raw => {
