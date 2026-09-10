@@ -11,6 +11,7 @@
 - 基础信息缓存、全球延迟缓存、故障旧缓存和短失败缓存
 - 并发请求合并、访问频率限制和每日检测上限
 - 中国大陆 IP（`country_code = CN`）自动排除
+- 仅 Komari 已登录管理员可触发插件状态、基础查询和全球延迟请求
 
 **中国香港、中国澳门和中国台湾**地区代码 `HK`、`MO`、`TW` 不在排除范围内。主题不展示纯净度、风险指数和污染度。
 
@@ -26,13 +27,14 @@ npm run package
 
 基础信息和原生性判断以 [Net.Coffee](https://ip.net.coffee/) 为主源。主源不可用时依次使用 [proxycheck.io v3](https://proxycheck.io/api/) 和 [ipapi.is](https://ipapi.is/) 补充地理与 ASN 信息。
 
-1. 主题先读取 Komari 后端保存的节点 `region`；能解析为 `CN` 时不调用插件的任何检测接口。
-2. 其他节点命中基础信息缓存时直接返回。
-3. 地区缺失或无法识别时，未命中的基础查询请求 `https://ip.net.coffee/api/ip/lookup/<IP>` 做兜底判断。
-4. Net.Coffee 返回 `CN` 时立即返回排除状态，不执行全球 Ping。
-5. Net.Coffee 失败时请求 proxycheck.io；仍失败时请求 ipapi.is。
-6. 用户打开 IP 信息面板后，复用基础缓存中的原生性结果，只请求一次 Net.Coffee 全球 Ping 接口。
-7. 降级基础数据缺少 Net.Coffee 判断时，先查询国家与原生性；如果判定为中国大陆，停止且不发送全球 Ping。
+1. 游客访问详情页时，主题不请求插件状态、基础信息或全球延迟接口。
+2. 登录后，主题先读取 Komari 后端保存的节点 `region`；能解析为 `CN` 时不调用插件的任何检测接口。
+3. 其他节点命中基础信息缓存时直接返回。
+4. 地区缺失或无法识别时，未命中的基础查询请求 `https://ip.net.coffee/api/ip/lookup/<IP>` 做兜底判断。
+5. Net.Coffee 返回 `CN` 时立即返回排除状态，不执行全球 Ping。
+6. Net.Coffee 失败时请求 proxycheck.io；仍失败时请求 ipapi.is。
+7. 登录用户打开 IP 信息面板后，复用基础缓存中的原生性结果，只请求一次 Net.Coffee 全球 Ping 接口。
+8. 降级基础数据缺少 Net.Coffee 判断时，先查询国家与原生性；如果判定为中国大陆，停止且不发送全球 Ping。
 
 基础信息默认缓存 24 小时，全球 Ping 默认缓存 60 分钟。全球 Ping 的 HTTP 失败会在 5 分钟内直接使用旧结果或返回错误，防止服务波动时反复请求。任一数据源故障时优先返回仍在保留期限内的旧缓存。
 
@@ -52,7 +54,7 @@ npm run package
 GET /api/public/ip-info/v1/status
 ```
 
-主题先请求此接口。插件不存在、未启用或接口不可达时，主题隐藏“IP 信息”入口。
+主题仅在确认用户已登录后请求此接口。插件不存在、未启用或接口不可达时，主题隐藏“IP 信息”入口；游客不会触发该请求。
 
 ### 基础信息
 
@@ -68,7 +70,7 @@ GET /api/public/ip-info/v1/lookup?uuid=<node-uuid>&ip=<public-ip>
 GET /api/public/ip-info/v1/latency?uuid=<node-uuid>&ip=<public-ip>
 ```
 
-主题只在用户切换到“IP 信息”后调用此接口。接口复用基础查询的原生性结果，正常情况下只向 Net.Coffee 发送一次全球 Ping 请求。
+主题只在登录用户切换到“IP 信息”后调用此接口。接口复用基础查询的原生性结果，正常情况下只向 Net.Coffee 发送一次全球 Ping 请求。
 
 ### 管理员刷新
 
@@ -79,9 +81,12 @@ Content-Type: application/json
 {
   "uuid": "node-uuid",
   "ip": "8.8.8.8",
-  "force": true
+  "force": true,
+  "include_latency": true
 }
 ```
+
+主题中的刷新按钮只提交当前选中的 IPv4 或 IPv6。插件会强制更新该地址的基础信息与六地延迟，不会刷新另一条 IP、其他服务器或整个节点列表。延迟服务临时失败时，基础信息仍会保存并返回，响应中的 `meta.latency_warning` 会说明延迟刷新状态。
 
 ### 管理员状态
 
@@ -89,7 +94,9 @@ Content-Type: application/json
 GET /api/admin/ip-info/v1/status
 ```
 
-两个管理员接口都检查 `req.context.principal.roles` 是否包含 `admin`。
+全部查询接口都会在访问数据源前检查 `req.context.principal.roles` 是否包含 `admin`。未登录游客直接收到 `403`，不会向任何第三方数据源发送节点 IP。
+
+这些已鉴权响应统一使用 `Cache-Control: private, no-store`，防止代理或共享浏览器缓存把 IP 信息提供给游客；实际的复用由插件内部缓存和主题查询缓存完成。
 
 ## 权限
 

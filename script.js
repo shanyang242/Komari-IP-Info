@@ -162,6 +162,7 @@ function cleanBody(req) {
   }
   const input = cleanInput({ query: { uuid: body.uuid, ip: body.ip } });
   input.force = body.force !== false;
+  input.include_latency = body.include_latency === true;
   return input;
 }
 
@@ -899,11 +900,12 @@ async function fetchAndStoreLatency(input, settings, sourceLookup) {
   }
 }
 
-async function resolveLatency(input, settings, sourceLookup) {
+async function resolveLatency(input, settings, sourceLookup, options) {
   const now = Date.now();
   const cached = getLatency(input);
-  if (isFresh(cached, now)) return { entry: cached, cache: "hit", warning: null };
-  const recentFailure = activeLatencyFailure(input, now);
+  const force = Boolean(options && options.force);
+  if (!force && isFresh(cached, now)) return { entry: cached, cache: "hit", warning: null };
+  const recentFailure = force ? null : activeLatencyFailure(input, now);
   if (recentFailure) {
     if (isUsableStale(cached, now)) {
       return { entry: cached, cache: "stale", warning: recentFailure.code };
@@ -1011,6 +1013,10 @@ function sendError(res, error, admin) {
 }
 
 async function handlePublicLookup(req, res) {
+  if (!hasAdminRole(req)) {
+    sendJSON(res, 403, { ok: false, error: { code: "forbidden", message: "登录后才能查看 IP 信息。" } });
+    return;
+  }
   try {
     const input = cleanInput(req);
     const settings = await getSettings();
@@ -1018,14 +1024,14 @@ async function handlePublicLookup(req, res) {
     const needsNetwork = !isFresh(cached, Date.now()) && settings.lazy_lookup;
     if (needsNetwork && !checkPublicMissRate(req.context && req.context.remote_ip)) {
       if (isUsableStale(cached, Date.now())) {
-        sendJSON(res, 200, publicPayload(input, { entry: cached, cache: "stale", warning: "caller_rate_limited" }), "public, max-age=30");
+        sendJSON(res, 200, publicPayload(input, { entry: cached, cache: "stale", warning: "caller_rate_limited" }), "private, no-store");
         return;
       }
       throw clientError("caller_rate_limited", "请求过于频繁，请稍后再试。", 429);
     }
     const resolved = await resolveLookup(input, settings, { force: false, allow_network: settings.lazy_lookup });
     if (bindLookup(input)) saveState();
-    sendJSON(res, 200, publicPayload(input, resolved), "public, max-age=60");
+    sendJSON(res, 200, publicPayload(input, resolved), "private, no-store");
   } catch (error) {
     console.warn("[ip-info] public lookup failed: " + (error && error.message ? error.message : error));
     sendError(res, error, false);
@@ -1033,6 +1039,10 @@ async function handlePublicLookup(req, res) {
 }
 
 async function handlePublicLatency(req, res) {
+  if (!hasAdminRole(req)) {
+    sendJSON(res, 403, { ok: false, error: { code: "forbidden", message: "登录后才能查看 IP 信息。" } });
+    return;
+  }
   try {
     const input = cleanInput(req);
     const sourceLookup = getLookup(input);
@@ -1048,20 +1058,20 @@ async function handlePublicLatency(req, res) {
     const now = Date.now();
     if (!isFresh(cached, now) && !settings.lazy_lookup) {
       if (cached) {
-        sendJSON(res, 200, publicPayload(input, { entry: cached, cache: "stale", warning: "refresh_required" }), "public, max-age=30");
+        sendJSON(res, 200, publicPayload(input, { entry: cached, cache: "stale", warning: "refresh_required" }), "private, no-store");
         return;
       }
       throw clientError("cache_miss", "当前 IP 尚无全球延迟缓存。", 404);
     }
     if (!isFresh(cached, now) && !checkPublicMissRate(req.context && req.context.remote_ip)) {
       if (isUsableStale(cached, now)) {
-        sendJSON(res, 200, publicPayload(input, { entry: cached, cache: "stale", warning: "caller_rate_limited" }), "public, max-age=30");
+        sendJSON(res, 200, publicPayload(input, { entry: cached, cache: "stale", warning: "caller_rate_limited" }), "private, no-store");
         return;
       }
       throw clientError("caller_rate_limited", "请求过于频繁，请稍后再试。", 429);
     }
     const resolved = await resolveLatency(input, settings, sourceLookup);
-    sendJSON(res, 200, publicPayload(input, resolved), "public, max-age=60");
+    sendJSON(res, 200, publicPayload(input, resolved), "private, no-store");
   } catch (error) {
     console.warn("[ip-info] public latency lookup failed: " + (error && error.message ? error.message : error));
     sendError(res, error, false);
@@ -1078,7 +1088,25 @@ async function handleAdminRefresh(req, res) {
     const settings = await getSettings();
     const resolved = await resolveLookup(input, settings, { force: input.force, allow_network: true });
     if (bindLookup(input)) saveState();
-    sendJSON(res, 200, publicPayload(input, resolved));
+    let latencyResolved = null;
+    let latencyWarning = null;
+    if (
+      input.include_latency &&
+      !resolved.entry.data.excluded &&
+      String(resolved.entry.data.location.country_code || "").toUpperCase() !== "CN"
+    ) {
+      try {
+        latencyResolved = await resolveLatency(input, settings, resolved.entry, { force: true });
+      } catch (latencyError) {
+        latencyWarning = latencyError && latencyError.code
+          ? latencyError.code
+          : "latency_provider_unavailable";
+      }
+    }
+    const payload = publicPayload(input, resolved);
+    payload.meta.latency_warning = latencyWarning;
+    if (latencyResolved) payload.related = { latency: publicPayload(input, latencyResolved) };
+    sendJSON(res, 200, payload);
   } catch (error) {
     console.warn("[ip-info] admin refresh failed: " + (error && error.message ? error.message : error));
     sendError(res, error, true);
@@ -1116,7 +1144,11 @@ async function handleAdminStatus(req, res) {
   }
 }
 
-function handlePublicStatus(_req, res) {
+function handlePublicStatus(req, res) {
+  if (!hasAdminRole(req)) {
+    sendJSON(res, 403, { ok: false, error: { code: "forbidden", message: "登录后才能查看 IP 信息。" } });
+    return;
+  }
   sendJSON(res, 200, {
     ok: true,
     data: {
@@ -1134,7 +1166,7 @@ function handlePublicStatus(_req, res) {
         ai_unlock: false,
       },
     },
-  }, "public, max-age=300");
+  }, "private, no-store");
 }
 
 function load() {

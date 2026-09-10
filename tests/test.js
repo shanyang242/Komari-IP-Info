@@ -288,24 +288,53 @@ try {
 
     const lookup = routes["GET /api/public/ip-info/v1/lookup"];
     const latency = routes["GET /api/public/ip-info/v1/latency"];
+    const status = routes["GET /api/public/ip-info/v1/status"];
+    const beforeGuestRequests = requests.length;
+    const guestStatusResponse = responseRecorder();
+    status({ context: { principal: { roles: ["guest"] } } }, guestStatusResponse);
+    assert.strictEqual(guestStatusResponse.statusCode, 403);
+    const guestLookupResponse = responseRecorder();
+    await lookup(
+      { query: { uuid: "node-guest", ip: "8.8.8.8" }, context: { principal: { roles: ["guest"] } } },
+      guestLookupResponse
+    );
+    assert.strictEqual(guestLookupResponse.statusCode, 403);
+    const guestLatencyResponse = responseRecorder();
+    await latency(
+      { query: { uuid: "node-guest", ip: "8.8.8.8" }, context: { principal: { roles: ["guest"] } } },
+      guestLatencyResponse
+    );
+    assert.strictEqual(guestLatencyResponse.statusCode, 403);
+    assert.strictEqual(requests.length, beforeGuestRequests, "guest requests must never call data providers");
+
     const cnStart = requests.length;
     const cnResponse = responseRecorder();
-    await lookup({ query: { uuid: "node-cn", ip: "1.2.3.4" }, context: { remote_ip: "192.0.2.1" } }, cnResponse);
+    await lookup({
+      query: { uuid: "node-cn", ip: "1.2.3.4" },
+      context: { remote_ip: "192.0.2.1", principal: { roles: ["admin"] } },
+    }, cnResponse);
     assert.strictEqual(cnResponse.statusCode, 200);
     const cnPayload = JSON.parse(cnResponse.body);
     assert.strictEqual(cnPayload.data.excluded, true);
     assert.strictEqual(cnPayload.data.excluded_reason, "mainland_china");
     assert.strictEqual(requests.length - cnStart, 1, "CN lookup must stop after the single provider response");
     const cnLatencyResponse = responseRecorder();
-    await latency({ query: { uuid: "node-cn", ip: "1.2.3.4" }, context: { remote_ip: "192.0.2.1" } }, cnLatencyResponse);
+    await latency({
+      query: { uuid: "node-cn", ip: "1.2.3.4" },
+      context: { remote_ip: "192.0.2.1", principal: { roles: ["admin"] } },
+    }, cnLatencyResponse);
     assert.strictEqual(cnLatencyResponse.statusCode, 404);
     assert.strictEqual(requests.length - cnStart, 1, "CN lookup must never trigger global latency providers");
 
     const foreignStart = requests.length;
-    const request = { query: { uuid: "node-us", ip: "8.8.8.8" }, context: { remote_ip: "192.0.2.2" } };
+    const request = {
+      query: { uuid: "node-us", ip: "8.8.8.8" },
+      context: { remote_ip: "192.0.2.2", principal: { roles: ["admin"] } },
+    };
     const first = responseRecorder();
     await lookup(request, first);
     assert.strictEqual(first.statusCode, 200);
+    assert.strictEqual(first.headers["Cache-Control"], "private, no-store");
     const firstPayload = JSON.parse(first.body);
     assert.strictEqual(firstPayload.meta.cache, "miss");
     assert.strictEqual(firstPayload.data.provider.base_source, "net-coffee");
@@ -324,6 +353,7 @@ try {
     const latencyResponse = responseRecorder();
     await latency(request, latencyResponse);
     assert.strictEqual(latencyResponse.statusCode, 200);
+    assert.strictEqual(latencyResponse.headers["Cache-Control"], "private, no-store");
     const latencyPayload = JSON.parse(latencyResponse.body);
     assert.strictEqual(latencyPayload.meta.cache, "miss");
     assert.strictEqual(latencyPayload.data.classification.type, "broadcast");
@@ -345,7 +375,10 @@ try {
     const fallbackStart = requests.length;
     const fallbackLookupResponse = responseRecorder();
     await lookup(
-      { query: { uuid: "node-fallback", ip: "4.4.4.4" }, context: { remote_ip: "192.0.2.3" } },
+      {
+        query: { uuid: "node-fallback", ip: "4.4.4.4" },
+        context: { remote_ip: "192.0.2.3", principal: { roles: ["admin"] } },
+      },
       fallbackLookupResponse
     );
     assert.strictEqual(fallbackLookupResponse.statusCode, 200);
@@ -356,7 +389,7 @@ try {
 
     const failedProfileRequest = {
       query: { uuid: "node-failure", ip: "7.7.7.7" },
-      context: { remote_ip: "192.0.2.4" },
+      context: { remote_ip: "192.0.2.4", principal: { roles: ["admin"] } },
     };
     const failedLookupResponse = responseRecorder();
     await lookup(failedProfileRequest, failedLookupResponse);
@@ -377,6 +410,27 @@ try {
     await refresh({ context: { principal: { roles: ["guest"] } }, body: JSON.stringify({ uuid: "node-us", ip: "8.8.8.8" }) }, forbidden);
     assert.strictEqual(forbidden.statusCode, 403);
     assert.strictEqual(requests.length, beforeForbidden, "unauthorized refresh must not call providers");
+
+    const beforeAdminRefresh = requests.length;
+    const refreshed = responseRecorder();
+    await refresh({
+      context: { principal: { roles: ["admin"] } },
+      body: JSON.stringify({
+        uuid: "node-us",
+        ip: "8.8.8.8",
+        force: true,
+        include_latency: true,
+      }),
+    }, refreshed);
+    assert.strictEqual(refreshed.statusCode, 200);
+    const refreshedPayload = JSON.parse(refreshed.body);
+    assert.strictEqual(refreshedPayload.meta.cache, "refresh");
+    assert.strictEqual(refreshedPayload.meta.latency_warning, null);
+    assert.strictEqual(refreshedPayload.related.latency.data.address.value, "8.8.8.8");
+    assert.strictEqual(refreshedPayload.related.latency.data.latency.nodes.length, 6);
+    assert.strictEqual(requests.length - beforeAdminRefresh, 2, "current IP refresh must call lookup and latency once each");
+    assert.ok(requests[beforeAdminRefresh].url.endsWith("/8.8.8.8"));
+    assert.ok(requests[beforeAdminRefresh + 1].url.includes("host=8.8.8.8"));
 
     console.log("All Komari IP Info tests passed.");
   })().catch(function (error) {
