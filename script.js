@@ -4,7 +4,7 @@ const path = require("path");
 const net = require("net");
 
 const PLUGIN_VERSION = "0.0.1";
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 const PROVIDER_ID = "net-coffee";
 const PROXYCHECK_BASE = "https://proxycheck.io/v3";
 const IPAPI_FALLBACK = "https://api.ipapi.is";
@@ -125,8 +125,10 @@ function numberInRange(value, fallback, min, max) {
 }
 
 async function getSettings() {
+  const deadline = Date.now() + 25000;
   const config = await server.getConfig();
   return {
+    deadline: deadline,
     cache_hours: numberInRange(config.cache_hours, 24, 1, 720),
     stale_hours: numberInRange(config.stale_hours, 168, 24, 2160),
     request_timeout_seconds: numberInRange(config.request_timeout_seconds, 5, 2, 8),
@@ -150,7 +152,7 @@ function cleanInput(req) {
   if (!family || !isPublicIP(ip, family)) {
     throw clientError("invalid_ip", "ip 必须是可公开路由的 IPv4 或 IPv6 地址。", 400);
   }
-  return { uuid: uuid, ip: ip, family: family };
+  return { uuid: uuid, ip: canonicalIP(ip), family: family };
 }
 
 function cleanBody(req) {
@@ -166,7 +168,15 @@ function cleanBody(req) {
   return input;
 }
 
+function canonicalIP(ip) {
+  if (typeof ip !== "string") return null;
+  if (net.isIP(ip) === 4) return ip;
+  if (net.isIP(ip) !== 6) return null;
+  return new URL("http://[" + ip + "]/").hostname.slice(1, -1);
+}
+
 function isPublicIP(ip, family) {
+  if (!family || net.isIP(ip) !== family) return false;
   if (family === 4) {
     const parts = ip.split(".").map(Number);
     const a = parts[0];
@@ -176,16 +186,21 @@ function isPublicIP(ip, family) {
     if (a === 169 && b === 254) return false;
     if (a === 172 && b >= 16 && b <= 31) return false;
     if (a === 192 && b === 0 && parts[2] === 0) return false;
+    if (a === 192 && b === 0 && parts[2] === 2) return false;
     if (a === 192 && b === 168) return false;
     if (a === 198 && (b === 18 || b === 19)) return false;
     if (a === 198 && b === 51 && parts[2] === 100) return false;
     if (a === 203 && b === 0 && parts[2] === 113) return false;
     return true;
   }
-  const lower = ip.toLowerCase();
-  if (lower === "::" || lower === "::1") return false;
-  if (/^(fc|fd)/.test(lower) || /^fe[89ab]/.test(lower) || /^ff/.test(lower)) return false;
-  if (/^2001:0?db8(?::|$)/.test(lower)) return false;
+  const lower = canonicalIP(ip);
+  // Only global unicast 2000::/3; excludes mapped IPv4, loopback and local scopes.
+  const words = lower.split(":");
+  const first = parseInt(words[0], 16);
+  const second = parseInt(words[1] || "0", 16);
+  if (first < 0x2000 || first > 0x3fff || !Number.isFinite(first)) return false;
+  if (first === 0x2001 && (second < 0x200 || second === 0xdb8)) return false;
+  if (first === 0x2002 || (first === 0x3fff && second <= 0x0fff)) return false;
   return true;
 }
 
@@ -326,8 +341,10 @@ function scoreLevel(score) {
 }
 
 async function requestJSON(url, settings, options) {
+  const remaining = settings.deadline == null ? Infinity : settings.deadline - Date.now();
+  if (remaining <= 0) throw clientError("provider_timeout", "IP 检测总耗时已达到上限。", 504);
   const controller = new AbortController();
-  const timer = setTimeout(function () { controller.abort(); }, settings.request_timeout_seconds * 1000);
+  const timer = setTimeout(function () { controller.abort(); }, Math.min(remaining, settings.request_timeout_seconds * 1000));
   try {
     const response = await fetch(url, {
       method: options && options.method ? options.method : "GET",
@@ -341,52 +358,33 @@ async function requestJSON(url, settings, options) {
     });
     const lengthHeader = response.headers && response.headers.get ? Number(response.headers.get("content-length")) : 0;
     if (Number.isFinite(lengthHeader) && lengthHeader > MAX_PROVIDER_BODY_BYTES) {
-      throw providerError("provider_response_too_large", "IP data provider response was too large", 502);
+      throw clientError("provider_response_too_large", "IP data provider response was too large", 502);
     }
     const text = await response.text();
     if (text.length > MAX_PROVIDER_BODY_BYTES) {
-      throw providerError("provider_response_too_large", "IP data provider response was too large", 502);
+      throw clientError("provider_response_too_large", "IP data provider response was too large", 502);
     }
     let data;
     try {
       data = text ? JSON.parse(text) : null;
     } catch (_) {
-      throw providerError("provider_invalid_response", "IP data provider returned invalid JSON", 502);
+      throw clientError("provider_invalid_response", "IP data provider returned invalid JSON", 502);
     }
     if (!response.ok || !data || typeof data !== "object" || data.error) {
       const code = response.status === 429 ? "provider_rate_limited" : "provider_error";
-      const error = providerError(code, "IP data provider returned HTTP " + response.status, response.status === 429 ? 429 : 502);
+      const error = clientError(code, "IP data provider returned HTTP " + response.status, response.status === 429 ? 429 : 502);
       error.retry_after = response.headers && response.headers.get ? response.headers.get("retry-after") : null;
       throw error;
     }
     return data;
   } catch (error) {
     if (error && error.name === "AbortError") {
-      throw providerError("provider_timeout", "IP data provider request timed out", 504);
+      throw clientError("provider_timeout", "IP data provider request timed out", 504);
     }
     throw error;
   } finally {
     clearTimeout(timer);
   }
-}
-
-function providerError(code, message, status) {
-  const error = new Error(message);
-  error.code = code;
-  error.status = status;
-  return error;
-}
-
-function emptySignals() {
-  return {
-    country_code: null,
-    proxy: null,
-    tor: null,
-    vpn: null,
-    datacenter: null,
-    abuser: null,
-    crawler: null,
-  };
 }
 
 function providerDescriptor(source) {
@@ -498,8 +496,9 @@ function netCoffeeGeoSource(raw) {
 }
 
 function normalizeNetCoffeeResponse(raw, ip, family) {
-  if (!raw || typeof raw !== "object" || raw.is_bogon === true) {
-    throw providerError("provider_invalid_response", "Net.Coffee returned an invalid or non-public address", 502);
+  if (!raw || typeof raw !== "object" || Array.isArray(raw) || raw.is_bogon === true ||
+      canonicalIP(raw.ip) !== canonicalIP(ip) || !normalizedCountryCode(raw.countryCode)) {
+    throw clientError("provider_invalid_response", "Net.Coffee returned an invalid or non-public address", 502);
   }
   const result = baseResult(ip, family, "net-coffee");
   const geo = netCoffeeGeoSource(raw);
@@ -566,12 +565,12 @@ function normalizeIpapiFallback(raw, ip, family) {
 function proxycheckAddressData(raw, ip) {
   const status = nullableString(raw && raw.status);
   if (status !== "ok" && status !== "warning") {
-    throw providerError(status === "denied" ? "provider_rate_limited" : "provider_error", "proxycheck.io returned status " + (status || "unknown"), status === "denied" ? 429 : 502);
+    throw clientError(status === "denied" ? "provider_rate_limited" : "provider_error", "proxycheck.io returned status " + (status || "unknown"), status === "denied" ? 429 : 502);
   }
   if (raw[ip] && typeof raw[ip] === "object") return raw[ip];
   const addressKeys = Object.keys(raw).filter(function (key) { return net.isIP(key) > 0; });
   if (addressKeys.length === 1 && raw[addressKeys[0]] && typeof raw[addressKeys[0]] === "object") return raw[addressKeys[0]];
-  throw providerError("provider_invalid_response", "proxycheck.io response did not contain the requested address", 502);
+  throw clientError("provider_invalid_response", "proxycheck.io response did not contain the requested address", 502);
 }
 
 function buildProxycheckReputation(detections, countryCode) {
@@ -807,7 +806,8 @@ async function requestNetworkProfile(ip, family, settings, sourceData) {
 
   if (!hasNetCoffeeBase) {
     try {
-      const lookupRaw = await requestJSON(NET_COFFEE_LOOKUP_BASE + "/" + encodeURIComponent(ip), extendedSettings);
+      const lookupRaw = await requestJSON(NET_COFFEE_LOOKUP_BASE + "/" + encodeURIComponent(ip), settings);
+      normalizeNetCoffeeResponse(lookupRaw, ip, family);
       const checkedCountry = normalizedCountryCode(lookupRaw && (lookupRaw.countryCode || lookupRaw.country_code));
       if (checkedCountry === "CN") {
         throw clientError("mainland_china_excluded", "中国大陆 IP 不执行全球延迟检测。", 404);
@@ -1097,6 +1097,7 @@ async function handleAdminRefresh(req, res) {
     ) {
       try {
         latencyResolved = await resolveLatency(input, settings, resolved.entry, { force: true });
+        latencyWarning = latencyResolved.warning;
       } catch (latencyError) {
         latencyWarning = latencyError && latencyError.code
           ? latencyError.code

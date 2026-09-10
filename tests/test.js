@@ -181,7 +181,7 @@ function plain(value) {
 }
 
 try {
-  const expose = "\n;globalThis.__test = { isPublicIP, parseCompactASN, normalizeIpapiFallback, normalizeNetCoffeeResponse, proxycheckAddressData, buildProxycheckReputation, normalizeProxycheckResponse, requestIpapiFallback, normalizeNativeClassification, normalizeLatencyResponse, hasAdminRole };";
+  const expose = "\n;globalThis.__test = { requestJSON, requestProvider, requestNetworkProfile, isPublicIP, parseCompactASN, normalizeIpapiFallback, normalizeNetCoffeeResponse, proxycheckAddressData, buildProxycheckReputation, normalizeProxycheckResponse, requestIpapiFallback, normalizeNativeClassification, normalizeLatencyResponse, hasAdminRole };";
   vm.runInNewContext(source + expose, context, { filename: "script.js" });
   vm.runInNewContext("load()", context);
   const helpers = context.__test;
@@ -197,6 +197,13 @@ try {
   });
 
   assert.strictEqual(helpers.isPublicIP("8.8.8.8", 4), true);
+  ["0:0:0:0:0:0:0:1", "::ffff:127.0.0.1", "::ffff:7f00:1", "2001:0db8:0:0::1", "fc00::1"].forEach(ip => {
+    assert.strictEqual(helpers.isPublicIP(ip, 6), false, ip);
+  });
+  assert.strictEqual(helpers.isPublicIP("192.0.2.1", 4), false);
+  [{}, [], { ip: "1.1.1.1", countryCode: "US" }, { ip: "8.8.8.8" }].forEach(raw => {
+    assert.throws(() => helpers.normalizeNetCoffeeResponse(raw, "8.8.8.8", 4));
+  });
   assert.strictEqual(helpers.isPublicIP("10.0.0.1", 4), false);
   assert.strictEqual(helpers.isPublicIP("198.51.100.1", 4), false);
   assert.strictEqual(helpers.isPublicIP("2001:4860:4860::8888", 6), true);
@@ -271,6 +278,26 @@ try {
 
   (async function () {
     const settings = await serverMock.getConfig();
+    const originalFetch = context.fetch;
+    const expiredStart = requests.length;
+    await assert.rejects(helpers.requestJSON("https://ip.net.coffee/api/ip/lookup/8.8.8.8", { ...settings, deadline: Date.now() - 1 }), { code: "provider_timeout" });
+    assert.strictEqual(requests.length, expiredStart, "expired budget must not send a request");
+    context.fetch = async (url, options) => url.includes("/api/ip/lookup/") ? response(200, {}) : originalFetch(url, options);
+    const invalidFallback = await helpers.requestProvider("8.8.8.8", 4, settings);
+    assert.strictEqual(invalidFallback.provider.base_source, "proxycheck-v3-fallback");
+    assert.strictEqual(invalidFallback.provider.primary_warning, "provider_invalid_response");
+    context.fetch = originalFetch;
+
+    let fakeNow = Date.now();
+    const timeouts = [];
+    context.Date = class extends Date { static now() { return fakeNow; } };
+    context.setTimeout = (callback, delay) => { timeouts.push(delay); return setTimeout(callback, delay); };
+    context.fetch = async (url, options) => { const result = await originalFetch(url, options); fakeNow += 80; return result; };
+    await helpers.requestNetworkProfile("8.8.8.8", 4, { ...settings, deadline: fakeNow + 100 });
+    assert.deepStrictEqual(timeouts, [100, 20], "classification and Ping must share one deadline");
+    context.Date = Date;
+    context.setTimeout = setTimeout;
+    context.fetch = originalFetch;
     const fallbackRequestCount = requests.length;
     const fallback = await helpers.requestIpapiFallback(
       "9.9.9.9",
@@ -431,6 +458,14 @@ try {
     assert.strictEqual(requests.length - beforeAdminRefresh, 2, "current IP refresh must call lookup and latency once each");
     assert.ok(requests[beforeAdminRefresh].url.endsWith("/8.8.8.8"));
     assert.ok(requests[beforeAdminRefresh + 1].url.includes("host=8.8.8.8"));
+
+    context.fetch = async (url, options) => url.includes("/api/ping/global?") ? response(503, {}) : originalFetch(url, options);
+    const partial = responseRecorder();
+    await refresh({ context: { principal: { roles: ["admin"] } }, body: JSON.stringify({ uuid: "node-us", ip: "8.8.8.8", force: true, include_latency: true }) }, partial);
+    assert.strictEqual(partial.statusCode, 200);
+    assert.ok(JSON.parse(partial.body).meta.latency_warning, "stale latency fallback must propagate a warning");
+    assert.strictEqual(JSON.parse(partial.body).related.latency.meta.stale, true);
+    context.fetch = originalFetch;
 
     console.log("All Komari IP Info tests passed.");
   })().catch(function (error) {
